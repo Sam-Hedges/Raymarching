@@ -1,0 +1,269 @@
+#pragma kernel CSMain
+
+#include "SDFShapes.cginc"
+#include "SDFOperations.cginc"
+#include "UnityCG.cginc"
+
+Texture2D<float4> Source;
+Texture2D<float4> _CameraDepthTexture;
+
+RWTexture2D<float4> Destination;
+
+float4x4 cameraToWorld;
+float4x4 cameraInverseProjection;
+
+float maxDistance;
+int maxIterations;
+
+// Light Data
+float3 lightDirection;
+float3 lightColor;
+float lightIntensity;
+
+// Shadows
+bool softShadows;
+float2 shadowDistance;
+float shadowIntensity;
+float shadowPenumbra;
+
+// Ambient Occlusion
+bool aoEnabled;
+float aoStepSize;
+float aoIntensity;
+int aoIterations;
+
+static const float epsilon = 0.0001;
+
+struct Ray{
+    float3 origin;
+    float3 direction;
+    float rayLength;
+};
+
+struct Shape
+{
+    float3 position;
+    float3 scale;
+    float3 rotation;
+    float3 color;
+    float4 data;
+    int shapeType;
+    int operationType;
+    float blendStrength;
+};
+
+// The StructuredBuffer is a special type of buffer that can be accessed from both the CPU and the GPU.
+// We are using it to store the shapes data that we will be using in the raymarching algorithm.
+StructuredBuffer<Shape> shapes;
+int shapesCount;
+
+Ray CreateRay(float3 origin, float3 direction, float rayLength){
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    ray.rayLength = rayLength;
+    return ray;
+}
+
+Ray CreateCameraRay(float2 uv)
+{
+    float3 origin = mul(cameraToWorld, float4(0, 0, 0, 1)).xyz;
+    float3 direction = mul(cameraInverseProjection, float4(uv, 0, 1)).xyz;
+    float rayLength = length(direction);
+    direction = mul(cameraToWorld, float4(direction, 0)).xyz;
+    direction = normalize(direction);
+    
+    return CreateRay(origin, direction, rayLength);
+}
+
+float CalculateShape(Shape shape, float3 eye)
+{
+    switch (shape.shapeType)
+    {
+    case 0:
+        return SDFSphere(eye, shape.position, shape.data.x, shape.rotation, shape.scale);
+    case 1:
+        return SDFCube(eye, shape.position, shape.scale, shape.rotation);
+    case 2:
+        return SDFPlane(eye, shape.data.xyz, shape.data.w);
+    case 3:
+        return SDFRoundBox(eye, shape.position, shape.scale, shape.data.x, shape.rotation);
+    case 4:
+        return SDFBoxFrame(eye, shape.position, shape.scale, shape.data.x, shape.rotation);
+    case 5:
+        return SDFTorus(eye, shape.position, shape.data.xy, shape.rotation, shape.scale);
+    case 6:
+        return SDFCapsule(eye, shape.position, shape.data.x, shape.data.y, shape.scale, shape.rotation);
+    default:
+        return maxDistance;
+    }
+}
+
+float4 CalculateOperation(float distanceA, float distanceB, float3 colorA, float3 colorB, int operationType, float blendStrength)
+{
+    switch (operationType)
+    {
+    case 0:
+        return OperationUnion(distanceA, distanceB, colorA, colorB);
+    case 1:
+        return OperationSubtraction(distanceA, distanceB, colorA, colorB);
+    case 2:
+        return OperationIntersection(distanceA, distanceB, colorA, colorB);
+    case 3:
+        return OperationSmoothUnion(distanceA, distanceB, colorA, colorB, blendStrength);
+    case 4:
+        return OperationSmoothSubtraction(distanceA, distanceB, colorA, colorB, blendStrength);
+    default:
+        return float4(colorA, distanceA);    
+    }
+}
+
+float4 CalculateSDF(float3 eye)
+{
+    float globalDistance = maxDistance;
+    float3 globalColor = 1;
+    
+    for (int i = 0; i < shapesCount; i++)
+    {
+        Shape shape = shapes[i];
+        
+        float distance = CalculateShape(shape, eye);
+        
+        float4 operation = CalculateOperation(globalDistance, distance, globalColor, shape.color, shape.operationType, shape.blendStrength);
+        globalColor = operation.xyz;
+        globalDistance = operation.w;
+    }
+    
+    return float4(globalColor, globalDistance);
+}
+
+float3 CalculateNormal(float3 p)
+{
+    float2 offset = float2(epsilon, 0);
+    
+    float x = CalculateSDF(p + offset.xyy).w - CalculateSDF(p - offset.xyy).w;
+    float y = CalculateSDF(p + offset.yxy).w - CalculateSDF(p - offset.yxy).w;
+    float z = CalculateSDF(p + offset.yyx).w - CalculateSDF(p - offset.yyx).w;
+    
+    return normalize(float3(x, y, z));
+}
+
+float HardShadows(Ray ray, float minDst, float maxDst)
+{
+    for (float t = minDst; t < maxDst;)
+    {
+        float h = CalculateSDF(ray.origin + ray.direction * t).w;
+        if (h <= epsilon)
+            return 0;
+        t += h;
+    }
+    return 1;
+}
+
+float SoftShadows(Ray ray, float minDst, float maxDst, float k)
+{
+    float result = 1;
+    for (float t = minDst; t < maxDst;)
+    {
+        float h = CalculateSDF(ray.origin + ray.direction * t).w;
+        if (h <= epsilon)
+            return 0;
+        result = min(result, k * h / t);
+        t += h;
+    }
+    return result;
+}
+
+float CalculateAO(float3 p, float3 normal)
+{
+    if (!aoEnabled)
+        return 1;
+    float step = aoStepSize;
+    float ao = 0;
+    float dist;
+    for (int i = 1; i < aoIterations; i++)
+    {
+        dist = step * i;
+        ao += max(0, (dist - CalculateSDF(p + normal * dist).w)) / dist;
+
+    }
+    return (1 - ao * aoIntensity);
+}
+
+float DoShading(float3 p)
+{
+    float3 normal = CalculateNormal(p);
+            
+    float3 light = lightColor * (dot(-lightDirection, normal) * 0.5 + 0.5) * lightIntensity;
+    
+    float shadow = 1;
+    if (softShadows)
+    {
+        shadow = SoftShadows(CreateRay(p, -lightDirection, 0), shadowDistance.x, shadowDistance.y, shadowPenumbra) * 0.5 + 0.5;
+    }
+    else
+    {
+        shadow = HardShadows(CreateRay(p, -lightDirection, 0), shadowDistance.x, shadowDistance.y) * 0.5 + 0.5;
+    }
+    shadow = max(0, pow(shadow, shadowIntensity));
+    
+    float ao = CalculateAO(p, normal);
+    
+    return light * shadow * ao;
+}
+
+float4 CalculateScene(Ray ray, float depth)
+{
+    float4 result = 1;
+    
+    float totalDistance = 0;
+    
+    for (int i = 0; i < maxIterations; i++)
+    {
+        if (totalDistance >= maxDistance || totalDistance >= depth)
+        {
+            result = 0;
+            break;
+        }
+        
+        float3 p = ray.origin + ray.direction * totalDistance;
+        
+        float4 sdf = CalculateSDF(p);
+        
+        float distance = sdf.w;
+        
+        if (distance <= epsilon)
+        {            
+            float shading = DoShading(p);
+            
+            result = float4(sdf.rgb * shading, totalDistance);
+            break;
+        }
+        
+        totalDistance += distance;
+    }
+    
+    return result;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Source.GetDimensions(width, height);
+    
+    float2 uv = (id.xy / float2(width, height)) * 2 - 1;
+    
+    Ray cameraRay = CreateCameraRay(uv);
+    
+    float depth = LinearEyeDepth(_CameraDepthTexture[id.xy].x);
+    depth *= cameraRay.rayLength;
+    
+    float4 result = CalculateScene(cameraRay, depth);
+    
+    if(result.w > 0)
+        // Destination[id.xy] = float4(result.xyz, 1);
+        Destination[id.xy] = float4(1, 1, 1, 1);
+    else
+        Destination[id.xy] = Source[id.xy];
+}

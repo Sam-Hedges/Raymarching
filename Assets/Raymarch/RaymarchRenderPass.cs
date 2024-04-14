@@ -1,102 +1,196 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
+using System.Collections.Generic;
 
 public class RaymarchRenderPass : ScriptableRenderPass
 {
-        private Material m_PassMaterial;
-        private int m_PassIndex;
-        private bool m_RequiresColor;
-        private bool m_IsBeforeTransparents;
-        private PassData m_PassData;
-        private ProfilingSampler m_ProfilingSampler;
-        private RTHandle m_CopiedColor;
-        private static readonly int m_BlitTextureShaderID = Shader.PropertyToID("_BlitTexture");
+    private const string ProfilerTag = "Raymarch Pass";
+    private RaymarchSettings _settings;
+    private readonly ComputeShader _raymarchComputeShader;
+    private int KernelIndex => _raymarchComputeShader.FindKernel("CSMain"); 
+    private List<ComputeBuffer> _computeBuffers;
+    private CameraData _cameraData;
 
-        public void Setup(Material mat, int index, bool requiresColor, bool isBeforeTransparents, string featureName, in RenderingData renderingData)
+
+    public RaymarchRenderPass(RenderPassEvent renderPassEvent, RaymarchSettings settings)
+    {
+        this.renderPassEvent = renderPassEvent;
+        _settings = settings;
+        _raymarchComputeShader = (ComputeShader)Resources.Load("Compute/Raymarching");
+    }
+
+    public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData)
+    {
+        _settings.light = RenderSettings.sun;
+        _cameraData = renderingData.cameraData;
+    }
+
+    public void SetCurrentSceneObjects(List<BaseShape> shapes)
+    {
+        if (_settings == null) return;
+        _settings.shapes = shapes;
+    }
+
+    public void Dispose()
+    {
+    }
+
+
+    public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
+    {
+        // Return if not a scene view cam or game cam
+        _cameraData = renderingData.cameraData;
+        if (_cameraData.cameraType != CameraType.SceneView && _cameraData.cameraType != CameraType.Game) return;
+
+        if (_settings.shapes.Count <= 0) return;
+        
+        RTHandle colorTarget = _cameraData.renderer.cameraColorTargetHandle;
+        RTHandle depthTarget = _cameraData.renderer.cameraDepthTargetHandle;
+        CommandBuffer cmd = CommandBufferPool.Get(ProfilerTag);
+
+        // Get temporary copy of the scene texture
+        RenderTexture tempColorTarget = RenderTexture.GetTemporary(_cameraData.cameraTargetDescriptor);
+        tempColorTarget.antiAliasing = 1;
+        tempColorTarget.enableRandomWrite = true;
+        cmd.Blit(colorTarget, tempColorTarget);
+
+        // Setup compute params
+        SetupComputeParams(cmd);
+        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "_CameraDepthTexture", depthTarget);
+        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "Source", colorTarget);
+        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "Destination", tempColorTarget);
+
+        // Dispatch according to thread count in shader
+        _raymarchComputeShader.GetKernelThreadGroupSizes(KernelIndex, out uint groupSizeX, out uint groupSizeY, out _);
+        int threadGroupsX = (int)Mathf.Ceil(tempColorTarget.width / (float)groupSizeX);
+        int threadGroupsY = (int)Mathf.Ceil(tempColorTarget.height / (float)groupSizeY);
+        cmd.DispatchCompute(_raymarchComputeShader, KernelIndex, threadGroupsX, threadGroupsY, 1);
+
+        // Sync compute with frame
+        AsyncGPUReadback.Request(tempColorTarget).WaitForCompletion();
+
+        // Copy temporary texture into colour buffer
+        cmd.Blit(tempColorTarget, colorTarget);
+        context.ExecuteCommandBuffer(cmd);
+
+        // Clean up
+        cmd.Clear();
+        RenderTexture.ReleaseTemporary(tempColorTarget);
+        CommandBufferPool.Release(cmd);
+
+        foreach (var buffer in _computeBuffers)
         {
-            m_PassMaterial = mat;
-            m_PassIndex = index;
-            m_RequiresColor = requiresColor;
-            m_IsBeforeTransparents = isBeforeTransparents;
-            m_ProfilingSampler ??= new ProfilingSampler(featureName);
+            buffer.Dispose();
+        }
+    }
+    
+    private void SetupComputeParams(CommandBuffer cmd)
+    {
+        _computeBuffers = new List<ComputeBuffer>();
 
-            var colorCopyDescriptor = renderingData.cameraData.cameraTargetDescriptor;
-            colorCopyDescriptor.depthBufferBits = (int) DepthBits.None;
-            RenderingUtils.ReAllocateIfNeeded(ref m_CopiedColor, colorCopyDescriptor, name: "_FullscreenPassColorCopy");
+        LoadShapes(cmd);
+        
+        cmd.SetComputeMatrixParam(_raymarchComputeShader, "cameraToWorld", _cameraData.camera.cameraToWorldMatrix);
+        cmd.SetComputeMatrixParam(_raymarchComputeShader, "cameraInverseProjection", _cameraData.camera.projectionMatrix.inverse);
 
-            m_PassData ??= new PassData();
+        cmd.SetComputeFloatParam(_raymarchComputeShader, "maxDistance", _settings.maxDistance);
+        cmd.SetComputeIntParam(_raymarchComputeShader, "maxIterations", _settings.maxIterations);
+
+        cmd.SetComputeFloatParam(_raymarchComputeShader, "shadowIntensity", _settings.shadowIntensity);
+        cmd.SetComputeFloatParam(_raymarchComputeShader, "shadowPenumbra", _settings.shadowPenumbra);
+        cmd.SetComputeIntParam(_raymarchComputeShader, "softShadows", _settings.useSoftShadows ? 1 : 0);
+        cmd.SetComputeVectorParam(_raymarchComputeShader, "shadowDistance", _settings.shadowDistance);
+
+        cmd.SetComputeFloatParam(_raymarchComputeShader, "aoStepSize", _settings.aoStepSize);
+        cmd.SetComputeFloatParam(_raymarchComputeShader, "aoIntensity", _settings.aoIntensity);
+        cmd.SetComputeIntParam(_raymarchComputeShader, "aoIterations", _settings.aoIterations);
+        cmd.SetComputeIntParam(_raymarchComputeShader, "aoEnabled", _settings.aoEnabled ? 1 : 0);
+        
+        LoadLight(cmd);
+    }
+    private void LoadShapes(CommandBuffer cmd) {
+        // get all shapes in the scene
+        List<BaseShape> tempShapesList = _settings.shapes;
+
+        // pass the number of shapes in the scene to the shader
+        cmd.SetComputeIntParam(_raymarchComputeShader, "shapesCount", tempShapesList.Count);
+
+        // sort the shapes by operation type
+        tempShapesList.Sort((a, b) => a.operationType.CompareTo(b.operationType));
+
+        // create a buffer to store the shape data
+        ShapeData[] shapeData = new ShapeData[tempShapesList.Count];
+
+        // iterate through the shapes and add their data to the buffer
+        for (int i = 0; i < tempShapesList.Count; i++) {
+            var shape = tempShapesList[i];
+            var transform = shape.transform;
+            
+            shapeData[i] = new ShapeData {
+                position = transform.position,
+                scale = shape.Scale,
+                rotation = transform.eulerAngles,
+                blendStrength = shape.blendStrength,
+                color = shape.Color,
+                data = shape.CreateExtraData(),
+                operationType = (int)shape.operationType,
+                shapeType = (int)shape.ShapeType
+            };
         }
 
-        public void Dispose()
-        {
-            m_CopiedColor?.Release();
+        // create a compute buffer to store the shape data
+        ComputeBuffer buffer = new ComputeBuffer(tempShapesList.Count, ShapeData.GetStride());
+        buffer.SetData(shapeData);
+
+        // pass the buffer to the shader
+        cmd.SetComputeBufferParam(_raymarchComputeShader, KernelIndex, "shapes", buffer);
+
+        // add the buffer to the list of buffers to dispose of after rendering
+        _computeBuffers.Add(buffer);
+    }
+
+    /// <summary>
+    /// Set the light parameters for the raymarching shader to the values of the sun light in the scene
+    /// </summary>
+    private void LoadLight(CommandBuffer cmd) {
+        Vector3 direction = Vector3.down;
+        Color color = Color.white;
+        float intensity = 1;
+
+        if (_settings.light) {
+            direction = _settings.light.transform.forward;
+            color = _settings.light.color;
+            intensity = _settings.light.intensity;
         }
 
+        cmd.SetComputeVectorParam(_raymarchComputeShader, "lightDirection", direction);
+        cmd.SetComputeVectorParam(_raymarchComputeShader, "lightColor", new Vector3(color.r, color.g, color.b));
+        cmd.SetComputeFloatParam(_raymarchComputeShader, "lightIntensity", intensity);
+    }
 
-        public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
-        {
-            m_PassData.effectMaterial = m_PassMaterial;
-            m_PassData.passIndex = m_PassIndex;
-            m_PassData.requiresColor = m_RequiresColor;
-            m_PassData.isBeforeTransparents = m_IsBeforeTransparents;
-            m_PassData.profilingSampler = m_ProfilingSampler;
-            m_PassData.copiedColor = m_CopiedColor;
+    /// <summary>
+    /// Contains data for a shape
+    /// </summary>
+    private struct ShapeData {
+        public Vector3 position;
+        public Vector3 scale;
+        public Vector3 rotation;
+        public Vector3 color;
+        public Vector4 data;
+        public int shapeType;
+        public int operationType;
+        public float blendStrength;
 
-            ExecutePass(m_PassData, ref renderingData, ref context);
+        /// <summary>
+        /// Return the size of the struct in bytes
+        /// </summary>
+        /// <returns>
+        /// Stride is the size of one element in the buffer, in bytes. Must be a multiple of 4 and less than 2048,
+        /// and match the size of the buffer type in the shader. 
+        /// </returns>
+        public static int GetStride() {
+            return sizeof(float) * 17 + sizeof(int) * 2;
         }
-
-        // RG friendly method
-        private static void ExecutePass(PassData passData, ref RenderingData renderingData, ref ScriptableRenderContext context)
-        {
-            var passMaterial = passData.effectMaterial;
-            var passIndex = passData.passIndex;
-            var requiresColor = passData.requiresColor;
-            var isBeforeTransparents = passData.isBeforeTransparents;
-            var copiedColor = passData.copiedColor;
-            var profilingSampler = passData.profilingSampler;
-
-            if (passMaterial == null)
-            {
-                // should not happen as we check it in feature
-                return;
-            }
-
-            if (renderingData.cameraData.isPreviewCamera)
-            {
-                return;
-            }
-
-            CommandBuffer cmd = new CommandBuffer();
-            CameraData cameraData = renderingData.cameraData;
-
-            using (new ProfilingScope(cmd, profilingSampler))
-            {
-                if (requiresColor)
-                {
-                    // For some reason BlitCameraTexture(cmd, dest, dest) scenario (as with before transparents effects) blitter fails to correctly blit the data
-                    // Sometimes it copies only one effect out of two, sometimes second, sometimes data is invalid (as if sampling failed?).
-                    // Adding RTHandle in between solves this issue.
-                    RTHandle source = cameraData.renderer.cameraColorTargetHandle;
-
-                    Blitter.BlitCameraTexture(cmd, source, copiedColor);
-                    passMaterial.SetTexture(m_BlitTextureShaderID, copiedColor);
-                }
-
-                CoreUtils.SetRenderTarget(cmd, cameraData.renderer.cameraColorTargetHandle);
-                CoreUtils.DrawFullScreen(cmd, passMaterial);
-                context.ExecuteCommandBuffer(cmd);
-                cmd.Clear();
-            }
-        }
-
-        private class PassData
-        {
-            internal Material effectMaterial;
-            internal int passIndex;
-            internal bool requiresColor;
-            internal bool isBeforeTransparents;
-            public ProfilingSampler profilingSampler;
-            public RTHandle copiedColor;
-        }
+    }
 }
