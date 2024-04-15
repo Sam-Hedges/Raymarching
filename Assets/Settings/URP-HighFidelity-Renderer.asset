@@ -23,11 +23,11 @@ MonoBehaviour:
     maxIterations: 512
     useSoftShadows: 1
     shadowPenumbra: 3
-    shadowIntensity: 0.5
+    shadowIntensity: 2
     shadowDistance: {x: 0.1, y: 70}
     aoEnabled: 1
     aoStepSize: 0.45
-    aoIterations: 3
+    aoIterations: 5
     aoIntensity: 0.197
 --- !u!114 &11400000
 MonoBehaviour:

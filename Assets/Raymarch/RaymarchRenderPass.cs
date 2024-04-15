@@ -34,11 +34,21 @@ public class RaymarchRenderPass : ScriptableRenderPass
 
     public void Dispose()
     {
+        if (_computeBuffers == null) return;
+        
         // Moving buffer disposal fixed buffers being destroyed before they'd been used
         foreach (var buffer in _computeBuffers)
         {
             buffer?.Dispose();
         }
+        _computeBuffers.Clear();
+    }
+
+    private void AsyncDispose(RenderTexture rt)
+    {
+        AsyncGPUReadback.Request(rt).WaitForCompletion();
+        
+        Dispose();
     }
 
     public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
@@ -73,18 +83,17 @@ public class RaymarchRenderPass : ScriptableRenderPass
         int threadGroupsY = Mathf.CeilToInt(tempColorTarget.height / (float)groupSizeY);
         cmd.DispatchCompute(_raymarchComputeShader, KernelIndex, threadGroupsX, threadGroupsY, 1);
 
-        // Sync compute with frame
-        AsyncGPUReadback.Request(tempColorTarget).WaitForCompletion();
-
         // Copy temporary texture into colour buffer
         cmd.Blit(tempColorTarget, colorTarget);
         context.ExecuteCommandBuffer(cmd);
+        
+        // Sync compute with frame
+        AsyncGPUReadback.Request(colorTarget.rt).WaitForCompletion();
 
         // Clean up
         cmd.Clear();
         RenderTexture.ReleaseTemporary(tempColorTarget);
         CommandBufferPool.Release(cmd);
-
     }
     
     private void SetupComputeParams(CommandBuffer cmd)
