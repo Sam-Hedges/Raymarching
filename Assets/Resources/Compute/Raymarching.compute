@@ -4,8 +4,8 @@
 #include "SDFOperations.cginc"
 #include "UnityCG.cginc"
 
-Texture2D<float4> Source;
-Texture2D<float4> _CameraDepthTexture;
+Texture2D Source;
+Texture2D _CameraDepthTexture;
 
 RWTexture2D<float4> Destination;
 
@@ -34,14 +34,13 @@ int aoIterations;
 
 static const float epsilon = 0.0001;
 
-struct Ray{
+struct Ray {
     float3 origin;
     float3 direction;
     float rayLength;
 };
 
-struct Shape
-{
+struct Shape {
     float3 position;
     float3 scale;
     float3 rotation;
@@ -190,24 +189,24 @@ float CalculateAO(float3 p, float3 normal)
     return (1 - ao * aoIntensity);
 }
 
-float DoShading(float3 p)
+float DoShading(float3 hitPoint)
 {
-    float3 normal = CalculateNormal(p);
+    float3 normal = CalculateNormal(hitPoint);
             
     float3 light = lightColor * (dot(-lightDirection, normal) * 0.5 + 0.5) * lightIntensity;
     
     float shadow = 1;
     if (softShadows)
     {
-        shadow = SoftShadows(CreateRay(p, -lightDirection, 0), shadowDistance.x, shadowDistance.y, shadowPenumbra) * 0.5 + 0.5;
+        shadow = SoftShadows(CreateRay(hitPoint, -lightDirection, 0), shadowDistance.x, shadowDistance.y, shadowPenumbra) * 0.5 + 0.5;
     }
     else
     {
-        shadow = HardShadows(CreateRay(p, -lightDirection, 0), shadowDistance.x, shadowDistance.y) * 0.5 + 0.5;
+        shadow = HardShadows(CreateRay(hitPoint, -lightDirection, 0), shadowDistance.x, shadowDistance.y) * 0.5 + 0.5;
     }
     shadow = max(0, pow(shadow, shadowIntensity));
     
-    float ao = CalculateAO(p, normal);
+    float ao = CalculateAO(hitPoint, normal);
     
     return light * shadow * ao;
 }
@@ -216,7 +215,7 @@ float4 CalculateScene(Ray ray, float depth)
 {
     float4 result = 1;
     
-    float totalDistance = 0;
+    float totalDistance = 0.0001;
     
     for (int i = 0; i < maxIterations; i++)
     {
@@ -226,15 +225,15 @@ float4 CalculateScene(Ray ray, float depth)
             break;
         }
         
-        float3 p = ray.origin + ray.direction * totalDistance;
+        float3 hitPoint = ray.origin + ray.direction * totalDistance;
         
-        float4 sdf = CalculateSDF(p);
+        float4 sdf = CalculateSDF(hitPoint);
         
         float distance = sdf.w;
         
         if (distance <= epsilon)
         {            
-            float shading = DoShading(p);
+            float shading = DoShading(hitPoint);
             
             result = float4(sdf.rgb * shading, totalDistance);
             break;
@@ -260,10 +259,18 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     depth *= cameraRay.rayLength;
     
     float4 result = CalculateScene(cameraRay, depth);
-    
+
+    // if(shapes[0].shapeType == 1) { // Check for a specific condition
+    //     Destination[id.xy] = float4(1, 0, 0, 1); // Output red if condition is true
+    // } else {
+    //     Destination[id.xy] = float4(0, 0, 1, 1); // Output blue otherwise
+    // }
+    // Destination[id.xy] = float4(shapes[0].color.xyz, 1);
+    // Destination[id.xy] = float4(result.xyz, 1);
+
     if(result.w > 0)
-        // Destination[id.xy] = float4(result.xyz, 1);
-        Destination[id.xy] = float4(1, 1, 1, 1);
+        Destination[id.xy] = float4(result.xyz, 1);
+        // Destination[id.xy] = float4(1, 1, 1, 1);
     else
         Destination[id.xy] = Source[id.xy];
 }

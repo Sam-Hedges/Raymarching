@@ -34,8 +34,12 @@ public class RaymarchRenderPass : ScriptableRenderPass
 
     public void Dispose()
     {
+        // Moving buffer disposal fixed buffers being destroyed before they'd been used
+        foreach (var buffer in _computeBuffers)
+        {
+            buffer?.Dispose();
+        }
     }
-
 
     public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
     {
@@ -51,20 +55,22 @@ public class RaymarchRenderPass : ScriptableRenderPass
 
         // Get temporary copy of the scene texture
         RenderTexture tempColorTarget = RenderTexture.GetTemporary(_cameraData.cameraTargetDescriptor);
-        tempColorTarget.antiAliasing = 1;
+        tempColorTarget.format = RenderTextureFormat.ARGBFloat; // Colour formatting was wrong without this
         tempColorTarget.enableRandomWrite = true;
+        tempColorTarget.antiAliasing = 1;
+        tempColorTarget.depth = 0;
         cmd.Blit(colorTarget, tempColorTarget);
 
         // Setup compute params
         SetupComputeParams(cmd);
-        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "_CameraDepthTexture", depthTarget);
-        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "Source", colorTarget);
+        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "_CameraDepthTexture", depthTarget.rt);
+        cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "Source", colorTarget.rt);
         cmd.SetComputeTextureParam(_raymarchComputeShader, KernelIndex, "Destination", tempColorTarget);
 
         // Dispatch according to thread count in shader
         _raymarchComputeShader.GetKernelThreadGroupSizes(KernelIndex, out uint groupSizeX, out uint groupSizeY, out _);
-        int threadGroupsX = (int)Mathf.Ceil(tempColorTarget.width / (float)groupSizeX);
-        int threadGroupsY = (int)Mathf.Ceil(tempColorTarget.height / (float)groupSizeY);
+        int threadGroupsX = Mathf.CeilToInt(tempColorTarget.width / (float)groupSizeX);
+        int threadGroupsY = Mathf.CeilToInt(tempColorTarget.height / (float)groupSizeY);
         cmd.DispatchCompute(_raymarchComputeShader, KernelIndex, threadGroupsX, threadGroupsY, 1);
 
         // Sync compute with frame
@@ -79,10 +85,6 @@ public class RaymarchRenderPass : ScriptableRenderPass
         RenderTexture.ReleaseTemporary(tempColorTarget);
         CommandBufferPool.Release(cmd);
 
-        foreach (var buffer in _computeBuffers)
-        {
-            buffer.Dispose();
-        }
     }
     
     private void SetupComputeParams(CommandBuffer cmd)
@@ -140,7 +142,7 @@ public class RaymarchRenderPass : ScriptableRenderPass
         }
 
         // create a compute buffer to store the shape data
-        ComputeBuffer buffer = new ComputeBuffer(tempShapesList.Count, ShapeData.GetStride());
+        ComputeBuffer buffer = new ComputeBuffer(shapeData.Length, ShapeData.GetStride());
         buffer.SetData(shapeData);
 
         // pass the buffer to the shader
