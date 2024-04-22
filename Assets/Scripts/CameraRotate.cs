@@ -6,6 +6,6 @@ public class CameraRotate : MonoBehaviour
 {
     void FixedUpdate()
     {
-        transform.Rotate(Vector3.up, 1);
+        transform.Rotate(Vector3.up, 0.5f);
     }
 }
