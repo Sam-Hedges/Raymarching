@@ -100,3 +100,42 @@ float SDFCapsule(float3 eye, float3 p, float h, float r, float3 scale, float3 ro
     origin.y -= clamp(origin.y, -h/2, h/2);
     return length(origin) - r;
 }
+
+// https://iquilezles.org/articles/mandelbulb
+float SDFMandelbulb(float3 eye, float3 position, float3 rotation, float3 scale, out float4 resColor)
+{
+    float3 transformedPosition = (eye - position);
+    transformedPosition = RotateObject(transformedPosition, rotation);
+    float4 scaled = ScaleObject(transformedPosition, scale);
+    transformedPosition = scaled.xyz;
+
+    float3 w = transformedPosition;
+    float m = dot(w,w);
+
+    float4 trap = float4(abs(w),m);
+    float dz = 1.0;
+    
+    for(int i = 0; i < 4; i++)
+    {
+        // trigonometric version (MUCH faster than polynomial)
+        // dz = 8*z^7*dz
+        dz = 8.0*pow(m,3.5)*dz + 1.0;
+      
+        // z = z^8+c
+        float r = length(w);
+        float b = 8.0 * acos(w.y / r);
+        float a = 8.0 * atan2(w.x, w.z);
+        w = eye + pow(r,8.0) * float3(sin(b) * sin(a), cos(b), sin(b) * cos(a));
+        
+        trap = min(trap, float4(abs(w), m));
+
+        m = dot(w, w);
+        if(m > 256.0)
+            break;
+    }
+
+    resColor = float4(m,trap.yzw);
+
+    // distance estimation (through the Hubbard-Douady potential)
+    return 0.25 * log(m) * sqrt(m) / dz;
+}

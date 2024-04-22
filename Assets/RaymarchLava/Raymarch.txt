@@ -1,0 +1,120 @@
+Shader "Unlit/RaymarchLava"
+{
+    Properties
+    {
+        _BaseMap("Albedo", 2D) = "white" {}
+        _BaseColor("Color", Color) = (1,1,1,1)
+        _SphereSize("Sphere Size", Float) = 1.0
+        _SpherePosition("Sphere Position", Vector) = (0, 0, 0, 0)
+        _MAX_STEPS("Max Steps", Int) = 100
+        _MAX_DISTANCE("Max Distance", Float) = 100.0
+        _SURFACE_DISTANCE("Surface Distance", Float) = 0.01
+        
+    }
+    SubShader
+    {
+        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "RenderPipeline" = "UniversalPipeline" }
+        LOD 300
+
+        Pass
+        {
+            Name "Raymarch"
+            
+            Blend SrcAlpha OneMinusSrcAlpha
+            ZWrite Off
+            Cull Off
+            ZTest Always    
+            
+            HLSLPROGRAM
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            
+            #pragma vertex Vertex
+            #pragma fragment Fragment
+
+            float4 _BaseMap_ST;
+            half4 _BaseColor;
+            float _SphereSize;
+            float4 _SpherePosition;
+
+            int MAX_STEPS = 100;
+            float MAX_DISTANCE = 100.0;
+            float SURFACE_DISTANCE = 0.01;
+            
+            struct Attributes
+            {
+                float4 positionOS   : POSITION;
+                float3 normalOS     : NORMAL;
+                float4 tangentOS    : TANGENT;
+                float2 texcoord     : TEXCOORD0;
+            };
+
+            struct Varyings
+            {
+                float2 uv : TEXCOORD0;
+                float4 positionCS : SV_POSITION;
+                float3 positionWS : TEXCOORD1;
+            };
+            
+            Varyings Vertex (Attributes input)
+            {
+                Varyings output;
+                VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
+                output.positionCS = vertexInput.positionCS;
+                output.positionWS = vertexInput.positionWS;
+                output.uv = TRANSFORM_TEX(input.texcoord, _BaseMap);
+                return output;
+            }
+
+            float SignedDistanceSphere(float3 position, float3 center, float radius)
+            {
+                return length(center - position) - radius;
+            }
+
+            float GetDistance(float3 position)
+            {
+                float sphere = SignedDistanceSphere(position, _SpherePosition.xyz, _SphereSize);
+                return sphere;  
+            }
+
+            float RayMarch(float3 rayOrigin, float3 rayDirection)
+            {
+                float distance = 0.0;
+
+                for (int i = 0; i < MAX_STEPS; i++)
+                {
+                    float3 position = rayOrigin + rayDirection * distance;
+                    float sceneDistance = GetDistance(position);
+                    distance += sceneDistance;
+                    if (distance > MAX_DISTANCE || sceneDistance < SURFACE_DISTANCE) break;
+                }
+                
+                return distance;
+            }
+            
+            
+            float4 Fragment (Varyings input) : SV_Target
+            {
+                float3 pixelPosition = input.positionWS;
+                float3 rayOrigin = GetCameraPositionWS();
+                float3 rayDirection = normalize(pixelPosition - rayOrigin);
+
+                float distance = RayMarch(rayOrigin, rayDirection);
+                if (distance > MAX_DISTANCE)
+                {
+                    _BaseColor.a = 0;
+                }
+                else
+                {
+                    _BaseColor.a = 1;
+                }
+                
+                // Use distance to colorize the fragment for debugging
+                return float4(distance, distance, distance, _BaseColor.a);
+                return _BaseColor;
+            }
+            
+            ENDHLSL
+        }
+    }
+}

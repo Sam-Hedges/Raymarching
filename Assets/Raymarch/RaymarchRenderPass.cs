@@ -98,6 +98,7 @@ public class RaymarchRenderPass : ScriptableRenderPass
     
     private void SetupComputeParams(CommandBuffer cmd)
     {
+        if (_computeBuffers != null) Dispose();
         _computeBuffers = new List<ComputeBuffer>();
 
         LoadShapes(cmd);

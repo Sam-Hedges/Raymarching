@@ -93,6 +93,8 @@ float CalculateShape(Shape shape, float3 eye)
         return SDFTorus(eye, shape.position, shape.data.xy, shape.rotation, shape.scale);
     case 6:
         return SDFCapsule(eye, shape.position, shape.data.x, shape.data.y, shape.scale, shape.rotation);
+    case 7:
+        return SDFMandelbulb(eye, shape.position, shape.rotation, shape.scale, shape.data);
     default:
         return maxDistance;
     }

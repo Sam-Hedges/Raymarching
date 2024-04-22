@@ -51,7 +51,8 @@ public enum ShapeType
     RoundBox,
     BoxFrame,
     Torus,
-    Capsule
+    Capsule,
+    Mandelbulb
 }
 
 public enum OperationType
